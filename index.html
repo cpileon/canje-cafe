@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Canje de café</title>
+<style>
+  :root { --verde:#1b8a3a; --rojo:#c62828; --ambar:#b26a00; --gris:#f2f2f2; --texto:#1c1c1c; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+         background:#fff; color:var(--texto); }
+  header { padding:14px 16px; background:#222; color:#fff; display:flex;
+           justify-content:space-between; align-items:center; }
+  header h1 { font-size:18px; margin:0; }
+  #stats { font-size:14px; opacity:.85; }
+  main { padding:16px; max-width:520px; margin:0 auto; }
+  .card { background:var(--gris); border-radius:12px; padding:14px; margin-bottom:14px; }
+  button { font-size:16px; padding:12px 16px; border:0; border-radius:10px;
+           background:#222; color:#fff; cursor:pointer; width:100%; margin-top:8px; }
+  button.sec { background:#e0e0e0; color:#222; }
+  button:disabled { opacity:.6; }
+  input[type=text], input[type=password] {
+    width:100%; font-size:16px; padding:12px; border:1px solid #bbb; border-radius:10px; }
+  #video-wrap { position:relative; display:none; }
+  video { width:100%; border-radius:12px; background:#000; }
+  #resultado { display:none; border-radius:14px; padding:24px 16px; text-align:center;
+               color:#fff; margin-bottom:14px; }
+  #resultado.ok { background:var(--verde); }
+  #resultado.used { background:var(--ambar); }
+  #resultado.bad { background:var(--rojo); }
+  #resultado .big { font-size:28px; font-weight:700; margin-bottom:6px; }
+  #resultado .small { font-size:15px; opacity:.95; word-break:break-all; }
+  #resultado button { background:rgba(255,255,255,.25); }
+  .hidden { display:none !important; }
+  .nota { font-size:13px; color:#555; margin-top:6px; }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>☕ Canje de café</h1>
+  <div id="stats"></div>
+</header>
+
+<main>
+
+  <!-- Pantalla de PIN -->
+  <section id="pantalla-pin" class="card">
+    <label for="pin"><strong>PIN de acceso</strong></label>
+    <input type="password" id="pin" autocomplete="off">
+    <button id="btn-pin">Entrar</button>
+    <div id="pin-error" class="nota" style="color:var(--rojo)"></div>
+  </section>
+
+  <!-- App principal -->
+  <section id="pantalla-app" class="hidden">
+
+    <div id="resultado"></div>
+
+    <div class="card">
+      <button id="btn-camara">📷 Escanear QR con la cámara</button>
+      <div id="video-wrap">
+        <video id="video" playsinline muted></video>
+        <button class="sec" id="btn-parar">Detener cámara</button>
+      </div>
+      <div id="cam-error" class="nota"></div>
+
+      <label class="nota" style="display:block;margin-top:12px">
+        Si la cámara en vivo no abre: toma una foto del QR
+      </label>
+      <input type="file" id="foto" accept="image/*" capture="environment">
+
+      <label for="manual" class="nota" style="display:block;margin-top:12px">
+        O escribe / pega el código a mano
+      </label>
+      <input type="text" id="manual" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <button class="sec" id="btn-manual">Verificar código</button>
+    </div>
+
+    <p class="nota">Para agregar códigos nuevos, pégalos directo en la planilla de Google (columna A).</p>
+
+  </section>
+</main>
+
+<canvas id="canvas" class="hidden"></canvas>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+<script>
+(function () {
+  /* ============================================================
+     PEGA AQUÍ el link de tu aplicación web de Apps Script
+     (el que termina en /exec), entre las comillas:
+     ============================================================ */
+  var API_URL = 'https://script.google.com/macros/s/AKfycbzSXKeZWkSjjXIQAznUAaWv_77e625ONOoFfyjWNmM2onwZ9wOdDu00cdwJju6jUL3EEQ/exec';
+
+  var pin = '';
+  var stream = null;
+  var scanning = false;
+  var bloqueado = false;      // evita lecturas repetidas del mismo QR
+  var ultimoCodigo = '';
+
+  function $(id) { return document.getElementById(id); }
+
+  /* ---------- llamada al Apps Script ---------- */
+  function api(op, params) {
+    if (!API_URL || API_URL.indexOf('https://script.google.com/') !== 0) {
+      return Promise.reject(new Error('Falta pegar el link /exec en el archivo (variable API_URL).'));
+    }
+    var u = new URL(API_URL);
+    u.searchParams.set('accion', 'api');
+    u.searchParams.set('op', op);
+    u.searchParams.set('pin', pin);
+    Object.keys(params || {}).forEach(function (k) { u.searchParams.set(k, params[k]); });
+
+    var ctrl = new AbortController();
+    var timer = setTimeout(function () { ctrl.abort(); }, 20000);
+    return fetch(u.toString(), { method: 'GET', redirect: 'follow', credentials: 'omit', signal: ctrl.signal })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        clearTimeout(timer);
+        if (!j || j.ok !== true) { throw new Error((j && j.error) || 'Error desconocido'); }
+        return j;
+      })
+      .catch(function (e) {
+        clearTimeout(timer);
+        if (e && e.name === 'AbortError') { throw new Error('Tardó demasiado. Revisa tu conexión y reintenta.'); }
+        if (e instanceof TypeError) { throw new Error('No se pudo conectar. Revisa tu conexión a internet.'); }
+        throw e;
+      });
+  }
+
+  function mostrarError(e) {
+    var msg = (e && e.message) ? e.message : String(e);
+    mostrarResultado('bad', 'Error', msg, null);
+  }
+
+  /* ---------- PIN ---------- */
+  function entrar() {
+    pin = $('pin').value.trim();
+    $('pin-error').textContent = '';
+    if (!pin) { return; }
+    $('btn-pin').disabled = true;
+    api('verify').then(function () {
+      try { sessionStorage.setItem('pin', pin); } catch (e) {}
+      $('pantalla-pin').classList.add('hidden');
+      $('pantalla-app').classList.remove('hidden');
+      actualizarStats();
+    }).catch(function (e) {
+      $('pin-error').textContent = e.message || 'No se pudo entrar';
+    }).then(function () { $('btn-pin').disabled = false; });
+  }
+  $('btn-pin').onclick = entrar;
+  $('pin').addEventListener('keydown', function (e) { if (e.key === 'Enter') entrar(); });
+  try {
+    var guardado = sessionStorage.getItem('pin');
+    if (guardado) { $('pin').value = guardado; entrar(); }
+  } catch (e) {}
+
+  /* ---------- estadísticas ---------- */
+  function actualizarStats() {
+    api('stats').then(function (s) {
+      $('stats').textContent = s.retirados + ' / ' + s.total + ' retirados';
+    }).catch(function () {});
+  }
+
+  /* ---------- resultado en pantalla ---------- */
+  function mostrarResultado(tipo, titulo, detalle, codigo) {
+    var box = $('resultado');
+    box.className = tipo;
+    box.style.display = 'block';
+    box.innerHTML = '';
+    var t = document.createElement('div'); t.className = 'big'; t.textContent = titulo;
+    var d = document.createElement('div'); d.className = 'small'; d.textContent = detalle || '';
+    box.appendChild(t); box.appendChild(d);
+    if (tipo === 'ok' && codigo) {
+      var u = document.createElement('button');
+      u.textContent = '↩ Deshacer (me equivoqué)';
+      u.onclick = function () {
+        api('undo', { codigo: codigo }).then(function () {
+          mostrarResultado('bad', 'Canje deshecho', codigo, null);
+          ultimoCodigo = '';
+          actualizarStats();
+        }).catch(mostrarError);
+      };
+      box.appendChild(u);
+    }
+    window.scrollTo(0, 0);
+    if (navigator.vibrate) navigator.vibrate(tipo === 'ok' ? 80 : [80, 60, 80]);
+  }
+
+  /* ---------- verificar código ---------- */
+  function verificar(codigo) {
+    codigo = (codigo || '').trim();
+    if (!codigo || bloqueado) return;
+    bloqueado = true;
+    api('redeem', { codigo: codigo }).then(function (r) {
+      if (r.status === 'ok') {
+        mostrarResultado('ok', '✅ Café disponible', 'Entregar café · ' + codigo, codigo);
+      } else if (r.status === 'used') {
+        mostrarResultado('used', '⚠️ Ya fue canjeado', (r.usedAt ? 'Retirado: ' + r.usedAt : ''), null);
+      } else {
+        mostrarResultado('bad', '❌ Código no válido', 'No está en la lista: ' + codigo, null);
+      }
+      actualizarStats();
+      setTimeout(function () { bloqueado = false; }, 2500);
+    }).catch(function (e) {
+      bloqueado = false;
+      ultimoCodigo = '';
+      mostrarError(e);
+    });
+  }
+
+  /* ---------- cámara en vivo ---------- */
+  function detener() {
+    scanning = false;
+    if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+    $('video-wrap').style.display = 'none';
+    $('btn-camara').classList.remove('hidden');
+  }
+  $('btn-parar').onclick = detener;
+
+  $('btn-camara').onclick = function () {
+    $('cam-error').textContent = '';
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      $('cam-error').textContent = 'Este navegador no permite la cámara en vivo. Usa "tomar foto" o escribe el código.';
+      return;
+    }
+    navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false })
+      .then(function (s) {
+        stream = s;
+        var v = $('video');
+        v.srcObject = s;
+        v.play();
+        $('video-wrap').style.display = 'block';
+        $('btn-camara').classList.add('hidden');
+        scanning = true;
+        requestAnimationFrame(tick);
+      })
+      .catch(function () {
+        $('cam-error').textContent = 'No se pudo abrir la cámara. Revisa que el navegador tenga permiso de cámara para esta página (candado junto a la dirección). Mientras tanto usa "tomar foto" o escribe el código.';
+      });
+  };
+
+  function tick() {
+    if (!scanning) return;
+    var v = $('video');
+    if (v.readyState === v.HAVE_ENOUGH_DATA) {
+      var c = $('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+      c.width = v.videoWidth; c.height = v.videoHeight;
+      ctx.drawImage(v, 0, 0, c.width, c.height);
+      var img = ctx.getImageData(0, 0, c.width, c.height);
+      var q = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
+      if (q && q.data && q.data !== ultimoCodigo) {
+        ultimoCodigo = q.data;
+        verificar(q.data);
+      }
+    }
+    requestAnimationFrame(tick);
+  }
+
+  /* ---------- respaldo: foto del QR ---------- */
+  $('foto').onchange = function (e) {
+    var file = e.target.files && e.target.files[0];
+    if (!file) return;
+    var url = URL.createObjectURL(file);
+    var im = new Image();
+    im.onload = function () {
+      var c = $('canvas'), ctx = c.getContext('2d', { willReadFrequently: true });
+      var max = 1200, k = Math.min(1, max / Math.max(im.width, im.height));
+      c.width = Math.round(im.width * k); c.height = Math.round(im.height * k);
+      ctx.drawImage(im, 0, 0, c.width, c.height);
+      var data = ctx.getImageData(0, 0, c.width, c.height);
+      var q = jsQR(data.data, data.width, data.height, { inversionAttempts: 'attemptBoth' });
+      URL.revokeObjectURL(url);
+      $('foto').value = '';
+      if (q && q.data) { verificar(q.data); }
+      else { mostrarResultado('bad', 'No pude leer el QR', 'Acércate más y toma otra foto, o escribe el código.', null); }
+    };
+    im.src = url;
+  };
+
+  /* ---------- respaldo: código a mano ---------- */
+  $('btn-manual').onclick = function () {
+    verificar($('manual').value);
+    $('manual').value = '';
+  };
+  $('manual').addEventListener('keydown', function (e) {
+    if (e.key === 'Enter') { verificar($('manual').value); $('manual').value = ''; }
+  });
+})();
+</script>
+</body>
+</html>
