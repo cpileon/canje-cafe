@@ -98,6 +98,7 @@
   var scanning = false;
   var bloqueado = false;      // evita lecturas repetidas del mismo QR
   var ultimoCodigo = '';
+  var ultimaFueCamara = false;  // para saber si "Escanear otro café" debe reabrir la cámara
 
   function $(id) { return document.getElementById(id); }
 
@@ -184,15 +185,27 @@
       };
       box.appendChild(u);
     }
+    var sig = document.createElement('button');
+    sig.id = 'btn-siguiente';
+    sig.textContent = '☕ Escanear otro café';
+    sig.style.background = '#fff';
+    sig.style.color = '#222';
+    sig.style.fontWeight = '700';
+    sig.onclick = siguiente;
+    box.appendChild(sig);
     window.scrollTo(0, 0);
     if (navigator.vibrate) navigator.vibrate(tipo === 'ok' ? 80 : [80, 60, 80]);
   }
 
   /* ---------- verificar código ---------- */
-  function verificar(codigo) {
+  function verificar(codigo, desdeCamara) {
     codigo = (codigo || '').trim();
     if (!codigo || bloqueado) return;
     bloqueado = true;
+    // Si la cámara estaba abierta (se haya leído el QR o escrito el código a mano),
+    // se detiene mientras se atiende este café, y "Escanear otro café" la vuelve a abrir.
+    ultimaFueCamara = !!desdeCamara || !!stream;
+    detener();
     api('redeem', { codigo: codigo }).then(function (r) {
       if (r.status === 'ok') {
         mostrarResultado('ok', '✅ Café disponible', 'Entregar café · ' + codigo, codigo);
@@ -219,7 +232,7 @@
   }
   $('btn-parar').onclick = detener;
 
-  $('btn-camara').onclick = function () {
+  function iniciarCamara() {
     $('cam-error').textContent = '';
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
       $('cam-error').textContent = 'Este navegador no permite la cámara en vivo. Usa "tomar foto" o escribe el código.';
@@ -239,7 +252,19 @@
       .catch(function () {
         $('cam-error').textContent = 'No se pudo abrir la cámara. Revisa que el navegador tenga permiso de cámara para esta página (candado junto a la dirección). Mientras tanto usa "tomar foto" o escribe el código.';
       });
-  };
+  }
+  $('btn-camara').onclick = function () { ultimoCodigo = ''; iniciarCamara(); };
+
+  /* ---------- siguiente café ---------- */
+  function siguiente() {
+    var box = $('resultado');
+    box.style.display = 'none';
+    box.innerHTML = '';
+    ultimoCodigo = '';
+    bloqueado = false;
+    if (ultimaFueCamara) { iniciarCamara(); }
+    else { $('manual').focus(); }
+  }
 
   function tick() {
     if (!scanning) return;
@@ -252,7 +277,7 @@
       var q = jsQR(img.data, img.width, img.height, { inversionAttempts: 'dontInvert' });
       if (q && q.data && q.data !== ultimoCodigo) {
         ultimoCodigo = q.data;
-        verificar(q.data);
+        verificar(q.data, true);
       }
     }
     requestAnimationFrame(tick);
